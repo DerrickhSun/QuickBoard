@@ -1,0 +1,54 @@
+{
+    "description": "A simple extension.",
+    "version": "1.0",
+    "manifest_version": 3,
+    "name": "Simple Extension",
+    "icons": {
+        "256": "icons/border-256.png"
+    },
+    "permissions": [
+        "activeTab",
+        "storage",
+        "downloads"
+    ],
+    "host_permissions": [
+        "https://*/*"
+    ],
+    "background": {
+        "service_worker": "background.js",
+        "scripts": ["background.js"]
+    },
+    "content_scripts": [
+        {
+            "matches": ["https://*/*"],
+            "js": ["content_scripts/shift.js", "content_scripts/content.js"],
+            "css": ["content_scripts/content.css"],
+            "run_at": "document_idle"
+        }
+    ],
+    "browser_specific_settings": {
+        "gecko": {
+            "id": "simple-extension@example.com",
+            "data_collection_permissions": {
+                "required": ["none"]
+            }
+        }
+    },
+    "action": {
+        "default_title": "Taskbar",
+        "default_icon": "icons/beasts-32.png",
+        "theme_icons": [
+        {
+            "light": "icons/beasts-32-light.png",
+            "dark": "icons/beasts-32.png",
+            "size": 32
+        }
+        ]
+    },
+    "web_accessible_resources": [
+        {
+            "resources": ["icons/beasts-32.png", "icons/beasts-32-light.png"],
+            "matches": ["<all_urls>"]
+        }
+    ]
+}
