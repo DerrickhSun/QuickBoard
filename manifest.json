@@ -2,7 +2,7 @@
     "description": "A simple extension.",
     "version": "1.0",
     "manifest_version": 3,
-    "name": "Simple Extension",
+    "name": "QuickBoard",
     "icons": {
         "256": "icons/border-256.png"
     },
@@ -21,14 +21,13 @@
     "content_scripts": [
         {
             "matches": ["https://*/*"],
-            "js": ["content_scripts/shift.js", "content_scripts/content.js"],
-            "css": ["content_scripts/content.css"],
+            "js": ["content_scripts/taskbar-shared.js", "content_scripts/scroll_elements.js", "content_scripts/content.js"],
             "run_at": "document_idle"
         }
     ],
     "browser_specific_settings": {
         "gecko": {
-            "id": "simple-extension@example.com",
+            "id": "quickboard@example.com",
             "data_collection_permissions": {
                 "required": ["none"]
             }
@@ -39,9 +38,9 @@
         "default_icon": "icons/beasts-32.png",
         "theme_icons": [
         {
-            "light": "icons/beasts-32-light.png",
-            "dark": "icons/beasts-32.png",
-            "size": 32
+            "light": "icons/clipboard-600.png",
+            "dark": "icons/clipboard-600.png",
+            "size": 600
         }
         ]
     },
