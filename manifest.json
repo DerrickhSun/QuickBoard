@@ -35,7 +35,7 @@
     },
     "action": {
         "default_title": "Taskbar",
-        "default_icon": "icons/beasts-32.png",
+        "default_icon": "icons/clipboard-600.png",
         "theme_icons": [
         {
             "light": "icons/clipboard-600.png",
@@ -46,7 +46,7 @@
     },
     "web_accessible_resources": [
         {
-            "resources": ["icons/beasts-32.png", "icons/beasts-32-light.png"],
+            "resources": ["icons/clipboard-600.png", "icons/clipboard-600-light.png"],
             "matches": ["<all_urls>"]
         }
     ]

@@ -13,8 +13,11 @@
 // fragile DOM surgery mid-drag). Each item has one or more members:
 //   - members.length === 1  -> a plain chip
 //   - members.length  >  1  -> a dropdown group
-// State is module-scoped so it survives toggling the bar off/on within a page
-// (it resets on navigation).
+// State is module-scoped so it survives toggling the bar off/on within a page.
+// It is also persisted in extension storage so chips survive navigation and stay
+// in sync across tabs.
+
+const QUICKBOARD_SCROLL_KEY = "quickboard_scroll_state";
 
 // Max characters shown on a chip's label; the full text is kept in the title
 // (hover) and in dataset.fullText for the future click handler.
@@ -34,7 +37,70 @@ let qbPanelHideTimer = null;
 let qbDrag = null;                // { fromItemId, memberText|null }  (null member = whole chip)
 let qbHighlightEl = null;         // current merge-target chip
 
+// content.js also lives in this scope and declares `browser`; use a distinct name.
+function qbBrowserApi() { return globalThis.browser ?? globalThis.chrome; }
+
+const qbStorageReady = qbLoadFromStorage();
+
 function qbNewId() { return "qb-item-" + (++qbIdSeq); }
+
+function qbNormalizeLoadedItems(items) {
+    if (!Array.isArray(items)) return [];
+    return items
+        .filter((item) =>
+            item && typeof item.id === "string" && Array.isArray(item.members) &&
+            item.members.length > 0 && item.members.every((m) => typeof m === "string")
+        )
+        .map((item) => ({ id: item.id, members: [...item.members] }));
+}
+
+function qbSyncIdSeqFromItems() {
+    let max = qbIdSeq;
+    for (const item of qbItems) {
+        const m = /^qb-item-(\d+)$/.exec(item.id);
+        if (m) max = Math.max(max, Number(m[1]));
+    }
+    qbIdSeq = max;
+}
+
+async function qbLoadFromStorage() {
+    try {
+        const res = await qbBrowserApi().storage.local.get(QUICKBOARD_SCROLL_KEY);
+        const state = res[QUICKBOARD_SCROLL_KEY];
+        if (state && Array.isArray(state.items)) {
+            qbItems = qbNormalizeLoadedItems(state.items);
+            qbIdSeq = Number.isFinite(state.idSeq) ? state.idSeq : 0;
+            qbSyncIdSeqFromItems();
+        }
+    } catch (e) { /* ignore */ }
+    if (qbEntriesEl) qbRender();
+}
+
+function qbSaveToStorage() {
+    qbBrowserApi().storage.local.set({
+        [QUICKBOARD_SCROLL_KEY]: { items: qbItems, idSeq: qbIdSeq },
+    }).catch(() => {});
+}
+
+function qbApplyStoredState(state) {
+    if (state && Array.isArray(state.items)) {
+        qbItems = qbNormalizeLoadedItems(state.items);
+        qbIdSeq = Number.isFinite(state.idSeq) ? state.idSeq : 0;
+        qbSyncIdSeqFromItems();
+    } else {
+        qbItems = [];
+        qbIdSeq = 0;
+    }
+    qbHidePanel();
+    qbRender();
+}
+
+try {
+    qbBrowserApi().storage.onChanged.addListener((changes, area) => {
+        if (area !== "local" || !(QUICKBOARD_SCROLL_KEY in changes)) return;
+        qbApplyStoredState(changes[QUICKBOARD_SCROLL_KEY].newValue);
+    });
+} catch (e) { /* ignore */ }
 
 function qbPreview(text) {
     return text.length > SCROLL_LABEL_PREVIEW
@@ -43,6 +109,10 @@ function qbPreview(text) {
 }
 
 function qbFindItem(id) { return qbItems.find((i) => i.id === id); }
+
+function qbCopyText(text) {
+    navigator.clipboard.writeText(text).catch(() => {});
+}
 
 // ---- public API ------------------------------------------------------------
 
@@ -85,13 +155,14 @@ function createScrollSection(shadow) {
         qbFinishDrag();
     });
 
-    qbRender();
+    qbStorageReady.then(() => qbRender());
     return section;
 }
 
 // Adds a new single-member element and scrolls to reveal it.
 function addScrollElement(text) {
     qbItems.push({ id: qbNewId(), members: [text] });
+    qbSaveToStorage();
     qbRender();
     if (qbEntriesEl) qbEntriesEl.scrollLeft = qbEntriesEl.scrollWidth;
 }
@@ -190,7 +261,7 @@ function qbRenderItem(item) {
     } else {
         mainBtn.textContent = qbPreview(item.members[0]);
         mainBtn.title = item.members[0];
-        mainBtn.dataset.fullText = item.members[0]; // for the future click handler
+        mainBtn.addEventListener("click", () => qbCopyText(item.members[0]));
     }
 
     const delBtn = qbMakeDeleteButton(() => qbRemoveItem(item.id));
@@ -289,8 +360,8 @@ function qbRenderMember(group, text) {
     btn.className = "qb-entry-btn";
     btn.textContent = text;
     btn.title = text;
-    btn.dataset.fullText = text;
     btn.style.cssText = "border-top-right-radius: 0; border-bottom-right-radius: 0; text-align: left;";
+    btn.addEventListener("click", () => qbCopyText(text));
 
     const del = qbMakeDeleteButton(() => qbDeleteMember(group, text));
 
@@ -371,6 +442,7 @@ function qbRemoveItem(id) {
     const i = qbItems.findIndex((x) => x.id === id);
     if (i >= 0) qbItems.splice(i, 1);
     if (qbActivePanelItemId === id) qbHidePanel();
+    qbSaveToStorage();
     qbRender();
 }
 
@@ -379,6 +451,7 @@ function qbDeleteMember(group, text) {
     if (mi >= 0) group.members.splice(mi, 1);
     qbRemoveIfEmpty(group);
     qbHidePanel();
+    qbSaveToStorage();
     qbRender();
 }
 
@@ -414,5 +487,6 @@ function qbFinishDrag() {
     qbDrag = null;
     qbClearAllHighlight();
     qbHidePanel();
+    qbSaveToStorage();
     qbRender();
 }
