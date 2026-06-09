@@ -56,12 +56,24 @@ function sharedStartShifting() {
             return;
         }
         for (const m of mutations) {
-            m.addedNodes.forEach((node) => {
-                if (node instanceof HTMLElement) sharedShiftWithin(node);
-            });
+            if (m.type === "attributes") {
+                // An element may have just become fixed/sticky via a class/style
+                // change (e.g. a header that only sticks to the top once you
+                // scroll, like Google's search bar), so re-check that element.
+                if (m.target instanceof HTMLElement) sharedShiftFixedElement(m.target);
+            } else {
+                m.addedNodes.forEach((node) => {
+                    if (node instanceof HTMLElement) sharedShiftWithin(node);
+                });
+            }
         }
     });
-    sharedTaskbarObserver.observe(document.body, { childList: true, subtree: true });
+    sharedTaskbarObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["class", "style"],
+    });
 }
 
 function sharedStopShifting() {
