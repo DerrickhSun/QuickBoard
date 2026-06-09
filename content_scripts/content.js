@@ -10,20 +10,11 @@ const QUICKBOARD_EXT_KEY = "quickboard";
 // QuickBoard's buttons always appear first, regardless of which loads first.
 const QUICKBOARD_ORDER = 0;
 
-// Triggers a file download from the page context via a temporary <a download>.
-// This works in both Chrome and Firefox, unlike downloads.download with a
-// data:/blob: URL (Firefox rejects those outright).
-function saveTextFile(text, filename) {
-    const blob = new Blob([text], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-}
+// Inline styles for the Rename toggle in its default vs. pressed (active) state.
+const QUICKBOARD_RENAME_BTN_BASE = "flex: 0 0 auto;";
+const QUICKBOARD_RENAME_BTN_ACTIVE =
+    "flex: 0 0 auto; background: #cfcfcf;" +
+    "box-shadow: inset 0 2px 4px rgba(0,0,0,0.35); transform: translateY(1px);";
 
 // Populates QuickBoard's own slot. The shared module handles creating the bar,
 // shifting the page, and tearing everything down when the last slot leaves. The
@@ -31,7 +22,7 @@ function saveTextFile(text, filename) {
 // scroll_elements.js — content.js only mounts the section and adds new elements.
 function buildQuickBoardSlot(slot, shadow) {
     // Let this slot grow within the bar so the scrollable section can claim the
-    // leftover space instead of pushing the Save button out.
+    // leftover space instead of pushing the Rename button out.
     slot.style.flex = "1 1 auto";
     slot.style.minWidth = "0";
 
@@ -45,13 +36,30 @@ function buildQuickBoardSlot(slot, shadow) {
     // The scrollable strip of generated elements, owned by scroll_elements.js.
     const section = createScrollSection(shadow);
 
-    // Existing save action, kept at the end of the slot (never scrolls away).
-    const saveBtn = document.createElement("button");
-    saveBtn.type = "button";
-    saveBtn.id = "qb-save-btn";
-    saveBtn.textContent = 'Save "Hello world"';
-    saveBtn.style.cssText = "flex: 0 0 auto;";
-    saveBtn.addEventListener("click", () => saveTextFile("Hello world", "hello.txt"));
+    // Rename-mode toggle, kept at the end of the slot (never scrolls away). While
+    // active, clicking elements edits their content instead of copying it, and
+    // the button shows a pressed-down state.
+    const renameBtn = document.createElement("button");
+    renameBtn.type = "button";
+    renameBtn.id = "qb-rename-btn";
+    renameBtn.textContent = "Rename";
+    renameBtn.style.cssText = QUICKBOARD_RENAME_BTN_BASE;
+    renameBtn.setAttribute("aria-pressed", "false");
+
+    let renameMode = false;
+    const syncRenameBtn = () => {
+        renameBtn.setAttribute("aria-pressed", String(renameMode));
+        renameBtn.style.cssText = renameMode
+            ? QUICKBOARD_RENAME_BTN_ACTIVE
+            : QUICKBOARD_RENAME_BTN_BASE;
+    };
+    renameBtn.addEventListener("click", () => {
+        renameMode = !renameMode;
+        setScrollRenameMode(renameMode);
+        syncRenameBtn();
+    });
+    setScrollRenameMode(false); // start in default mode each time the bar is built
+    syncRenameBtn();
 
     // On Enter, hand the text to scroll_elements to create a new element.
     input.addEventListener("keydown", (e) => {
@@ -65,7 +73,7 @@ function buildQuickBoardSlot(slot, shadow) {
 
     slot.appendChild(input);
     slot.appendChild(section);
-    slot.appendChild(saveBtn);
+    slot.appendChild(renameBtn);
 }
 
 function createTaskbar() {
