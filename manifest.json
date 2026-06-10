@@ -1,10 +1,10 @@
 {
-    "description": "A simple extension.",
+    "description": "A simple extension that creates a taskbar along the top to save copied elements.",
     "version": "1.0",
     "manifest_version": 3,
     "name": "QuickBoard",
     "icons": {
-        "256": "icons/border-256.png"
+        "600": "icons/clipboard-600.png"
     },
     "permissions": [
         "activeTab",

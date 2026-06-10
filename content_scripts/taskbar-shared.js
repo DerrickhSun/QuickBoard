@@ -89,6 +89,29 @@ function sharedStopShifting() {
 }
 
 // ---- host lifecycle --------------------------------------------------------
+// Build the shadow DOM with createElement (not innerHTML) so static analyzers
+// don't flag unsafe HTML assignment; markup is still entirely hardcoded constants.
+function sharedBuildShadowDom(shadow) {
+    const style = document.createElement("style");
+    style.textContent =
+        ":host{display:block;width:100%;height:100%;}" +
+        ".bar{display:flex;align-items:center;gap:8px;height:100%;padding:0 12px;" +
+        "box-sizing:border-box;font-family:system-ui,sans-serif;}" +
+        "." + SHARED_TASKBAR.SLOTS_CLASS + "{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0;}" +
+        "." + SHARED_TASKBAR.SLOT_CLASS + "{display:flex;align-items:center;gap:6px;flex:0 0 auto;}" +
+        "button{padding:6px 12px;font-size:13px;cursor:pointer;}";
+
+    const bar = document.createElement("div");
+    bar.className = "bar";
+
+    const slots = document.createElement("div");
+    slots.className = SHARED_TASKBAR.SLOTS_CLASS;
+
+    bar.appendChild(slots);
+    shadow.appendChild(style);
+    shadow.appendChild(bar);
+}
+
 // Idempotent and synchronous: content scripts from different extensions run as
 // separate tasks on the same thread, so a synchronous check-then-create here
 // guarantees the second extension reuses the first one's host (no race, no
@@ -105,16 +128,7 @@ function sharedEnsureTaskbar() {
         "background-color: #f0f0f0; z-index: 2147483647;";
 
     const shadow = host.attachShadow({ mode: "open" });
-    shadow.innerHTML =
-        "<style>" +
-        ":host{display:block;width:100%;height:100%;}" +
-        ".bar{display:flex;align-items:center;gap:8px;height:100%;padding:0 12px;" +
-        "box-sizing:border-box;font-family:system-ui,sans-serif;}" +
-        "." + SHARED_TASKBAR.SLOTS_CLASS + "{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0;}" +
-        "." + SHARED_TASKBAR.SLOT_CLASS + "{display:flex;align-items:center;gap:6px;flex:0 0 auto;}" +
-        "button{padding:6px 12px;font-size:13px;cursor:pointer;}" +
-        "</style>" +
-        '<div class="bar"><div class="' + SHARED_TASKBAR.SLOTS_CLASS + '"></div></div>';
+    sharedBuildShadowDom(shadow);
 
     document.documentElement.prepend(host);
     sharedStartShifting();
