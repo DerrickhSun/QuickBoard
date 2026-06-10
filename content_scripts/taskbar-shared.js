@@ -14,6 +14,7 @@ const SHARED_TASKBAR = {
     SLOT_CLASS: "shared-taskbar-slot",
     HEIGHT: 50,
     SHIFTED_ATTR: "data-shared-taskbar-prev-top",
+    SHIFT_BASE_ATTR: "data-shared-taskbar-shift-base",
     EVT_READY: "shared-taskbar:ready",
     EVT_REMOVED: "shared-taskbar:removed",
 };
@@ -24,19 +25,65 @@ const SHARED_TASKBAR = {
 // that didn't create the taskbar. The MutationObserver is the only piece of
 // per-extension JS state, so it self-terminates when it notices the host is gone.
 let sharedTaskbarObserver = null;
+let sharedScrollReshiftHandler = null;
+let sharedScrollReshiftRaf = null;
+
+function sharedHasShiftedFixedAncestor(el) {
+    let node = el.parentElement;
+    while (node) {
+        if (!(node instanceof HTMLElement)) break;
+        if (node.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) {
+            const pcs = getComputedStyle(node);
+            if (pcs.position === "fixed" || pcs.position === "sticky") return true;
+        }
+        node = node.parentElement;
+    }
+    return false;
+}
+
+function sharedGetShiftBaseTop(el) {
+    const base = parseFloat(el.getAttribute(SHARED_TASKBAR.SHIFT_BASE_ATTR));
+    return isNaN(base) ? 0 : base;
+}
 
 function sharedShiftFixedElement(el) {
     if (!(el instanceof HTMLElement)) return;
-    if (el.id === SHARED_TASKBAR.HOST_ID || el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) return;
+    if (el.id === SHARED_TASKBAR.HOST_ID) return;
+    if (sharedHasShiftedFixedAncestor(el)) return;
 
     const cs = getComputedStyle(el);
-    if (cs.position !== "fixed" && cs.position !== "sticky") return;
+    if (cs.position !== "fixed" && cs.position !== "sticky") {
+        // Page stopped sticking this element; restore so we can shift again later.
+        if (el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) {
+            el.style.top = el.getAttribute(SHARED_TASKBAR.SHIFTED_ATTR);
+            el.removeAttribute(SHARED_TASKBAR.SHIFTED_ATTR);
+            el.removeAttribute(SHARED_TASKBAR.SHIFT_BASE_ATTR);
+        }
+        return;
+    }
+
+    if (el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) {
+        // Always restore to the original base + bar height. Do not add HEIGHT
+        // to the current computed top (that double-shifts after Google scroll).
+        const target = sharedGetShiftBaseTop(el) + SHARED_TASKBAR.HEIGHT;
+        const current = parseFloat(cs.top);
+        if (isNaN(current) || Math.abs(current - target) > 0.5) {
+            el.style.top = target + "px";
+        }
+        return;
+    }
 
     const top = parseFloat(cs.top);
     if (isNaN(top) || top >= SHARED_TASKBAR.HEIGHT) return;
 
     el.setAttribute(SHARED_TASKBAR.SHIFTED_ATTR, el.style.top);
-    el.style.top = top + SHARED_TASKBAR.HEIGHT + "px";
+    el.setAttribute(SHARED_TASKBAR.SHIFT_BASE_ATTR, String(top));
+    el.style.top = (top + SHARED_TASKBAR.HEIGHT) + "px";
+}
+
+function sharedReshiftTrackedElements() {
+    document.querySelectorAll("[" + SHARED_TASKBAR.SHIFTED_ATTR + "]")
+        .forEach(sharedShiftFixedElement);
 }
 
 function sharedShiftWithin(root) {
@@ -74,9 +121,28 @@ function sharedStartShifting() {
         attributes: true,
         attributeFilter: ["class", "style"],
     });
+
+    if (!sharedScrollReshiftHandler) {
+        sharedScrollReshiftHandler = () => {
+            if (sharedScrollReshiftRaf) return;
+            sharedScrollReshiftRaf = requestAnimationFrame(() => {
+                sharedScrollReshiftRaf = null;
+                sharedReshiftTrackedElements();
+            });
+        };
+        window.addEventListener("scroll", sharedScrollReshiftHandler, { passive: true, capture: true });
+    }
 }
 
 function sharedStopShifting() {
+    if (sharedScrollReshiftHandler) {
+        window.removeEventListener("scroll", sharedScrollReshiftHandler, { capture: true });
+        sharedScrollReshiftHandler = null;
+    }
+    if (sharedScrollReshiftRaf) {
+        cancelAnimationFrame(sharedScrollReshiftRaf);
+        sharedScrollReshiftRaf = null;
+    }
     if (sharedTaskbarObserver) {
         sharedTaskbarObserver.disconnect();
         sharedTaskbarObserver = null;
@@ -85,6 +151,7 @@ function sharedStopShifting() {
     document.querySelectorAll("[" + SHARED_TASKBAR.SHIFTED_ATTR + "]").forEach((el) => {
         el.style.top = el.getAttribute(SHARED_TASKBAR.SHIFTED_ATTR);
         el.removeAttribute(SHARED_TASKBAR.SHIFTED_ATTR);
+        el.removeAttribute(SHARED_TASKBAR.SHIFT_BASE_ATTR);
     });
 }
 
