@@ -178,6 +178,14 @@ function sharedGetEffectiveTop(el, cs) {
         }
         return rectTop < SHARED_TASKBAR.MAX_SHIFT_TOP ? rectTop : 0;
     }
+
+    if (sharedIsTopViewportChrome(el, cs)) {
+        const rectTop = Math.round(el.getBoundingClientRect().top);
+        if (el.hasAttribute(SHARED_TASKBAR.SHIFT_BASE_ATTR)) {
+            return sharedGetShiftBaseTop(el) + SHARED_TASKBAR.HEIGHT;
+        }
+        return rectTop <= SHARED_TASKBAR.MAX_SHIFT_TOP ? rectTop : 0;
+    }
     return null;
 }
 
@@ -188,8 +196,70 @@ function sharedIsLikelyPrimaryNav(el, cs) {
     if (sharedIsJobSearchFilter(el)) return false;
     if (sharedIsJobSearchSecondaryHeader(el, cs)) return false;
     if (el.closest("header, [role=\"banner\"], #global-nav, .global-nav")) return true;
+    if (el.closest("shreddit-header, reddit-header")) return true;
     const rect = el.getBoundingClientRect();
-    return rect.top >= 0 && rect.top < SHARED_TASKBAR.HEIGHT && rect.width > window.innerWidth * 0.4;
+    return rect.top >= 0 && rect.top <= SHARED_TASKBAR.HEIGHT && rect.width > window.innerWidth * 0.4;
+}
+
+// Full-width bar pinned to the top band of the viewport (not a anchored popup).
+function sharedIsTopViewportChrome(el, cs) {
+    cs = cs || getComputedStyle(el);
+    if (cs.position !== "fixed" && cs.position !== "sticky") return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.height <= 0 || rect.width < window.innerWidth * 0.4) return false;
+    return rect.top >= 0 && rect.top <= SHARED_TASKBAR.HEIGHT + 8;
+}
+
+// Full-width top chrome we still shift (nav, stacked sub-headers). Narrow overlays
+// and menus are usually app-positioned relative to already-shifted layout.
+function sharedIsViewportHeaderCandidate(el, cs, rect) {
+    cs = cs || getComputedStyle(el);
+    if (sharedIsLikelyPrimaryNav(el, cs)) return true;
+    rect = rect || el.getBoundingClientRect();
+    if (rect.height <= 0) return false;
+    return rect.top < SHARED_TASKBAR.MAX_SHIFT_TOP && rect.width > window.innerWidth * 0.4;
+}
+
+// Popups/menus positioned below the taskbar zone (often via anchor getBoundingClientRect
+// after body padding or a shifted header) — shifting again double-offsets them.
+function sharedIsAppPositionedOverlay(el, cs) {
+    if (sharedIsViewportHeaderCandidate(el, cs)) return false;
+    if (sharedIsTopViewportChrome(el, cs)) return false;
+
+    const top = sharedGetEffectiveTop(el, cs);
+    if (top !== null) return top >= SHARED_TASKBAR.HEIGHT - 4;
+
+    return el.getBoundingClientRect().top >= SHARED_TASKBAR.HEIGHT - 4;
+}
+
+function sharedRectsLookAnchoredToReference(popupRect, refRect) {
+    const vMargin = 96;
+    const overlap = Math.min(popupRect.right, refRect.right) -
+        Math.max(popupRect.left, refRect.left);
+    if (overlap <= Math.min(popupRect.width, refRect.width) * 0.15) return false;
+    if (Math.abs(popupRect.top - refRect.bottom) <= vMargin) return true;
+    if (popupRect.top >= refRect.top - 8 && popupRect.top <= refRect.bottom + vMargin) {
+        return true;
+    }
+    return false;
+}
+
+function sharedFindAnchoredShiftedReference(el) {
+    if (sharedIsViewportHeaderCandidate(el, getComputedStyle(el))) return null;
+    if (sharedIsTopViewportChrome(el, getComputedStyle(el))) return null;
+
+    const rect = el.getBoundingClientRect();
+    if (rect.height <= 0 || rect.width <= 0) return null;
+
+    for (const shifted of sharedShiftedElements) {
+        if (!shifted.isConnected || shifted === el) continue;
+        if (shifted.contains(el)) continue;
+
+        const refRect = shifted.getBoundingClientRect();
+        if (refRect.height <= 0) continue;
+        if (sharedRectsLookAnchoredToReference(rect, refRect)) return shifted;
+    }
+    return null;
 }
 
 function sharedFindLinkedInGlobalNav() {
@@ -210,9 +280,25 @@ function sharedFindLinkedInGlobalNav() {
     return null;
 }
 
+function sharedFindRedditHeader() {
+    if (!/reddit\.com/i.test(location.hostname)) return null;
+    const selectors = [
+        "shreddit-header",
+        "reddit-header",
+        "[data-testid=\"reddit-header\"]",
+    ];
+    for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el instanceof HTMLElement) {
+            return sharedFindPositionedAncestorOrSelf(el) || el;
+        }
+    }
+    return null;
+}
+
 // Cheap upkeep for the main nav and already-tracked headers — not a full-page rescan.
 function sharedShiftPrimaryHeaders() {
-    const nav = sharedFindLinkedInGlobalNav();
+    const nav = sharedFindLinkedInGlobalNav() || sharedFindRedditHeader();
     if (nav) sharedShiftFixedElement(nav);
     for (const el of sharedShiftedElements) {
         if (el.isConnected) sharedShiftFixedElement(el);
@@ -454,12 +540,16 @@ function sharedShouldSkipShift(el, cs) {
     if (sharedIsOrgStickyCard(el)) return false;
     if (sharedIsJobSearchFilter(el)) return true;
     if (sharedIsJobSearchSecondaryHeader(el, cs)) return true;
+    if (sharedIsAppPositionedOverlay(el, cs)) return true;
+    if (sharedFindAnchoredShiftedReference(el)) return true;
 
     const ancestor = sharedFindNearestShiftedFixedAncestor(el);
     if (!ancestor) return false;
 
     if (sharedHasFixedContainingBlockAncestor(el)) return true;
-    return sharedIsInShiftedHeaderBand(el, ancestor);
+    if (sharedIsInShiftedHeaderBand(el, ancestor)) return true;
+    if (!sharedIsViewportHeaderCandidate(el, cs)) return true;
+    return false;
 }
 
 function sharedRestoreShiftedElement(el) {
@@ -515,9 +605,31 @@ function sharedShiftFixedElement(el, cs) {
     if (top < SHARED_TASKBAR.HEIGHT) sharedRecordShiftRowHeight(el);
 }
 
+function sharedShiftElementTree(root) {
+    if (!(root instanceof HTMLElement) && !(root instanceof DocumentFragment)) return;
+
+    const queue = [root];
+    const seenRoots = new Set([root]);
+
+    while (queue.length) {
+        const node = queue.shift();
+        if (!(node instanceof HTMLElement) && !(node instanceof DocumentFragment)) continue;
+
+        if (node instanceof HTMLElement) sharedShiftFixedElement(node);
+
+        if (!node.querySelectorAll) continue;
+        node.querySelectorAll("*").forEach((el) => {
+            sharedShiftFixedElement(el);
+            if (el.shadowRoot && !seenRoots.has(el.shadowRoot)) {
+                seenRoots.add(el.shadowRoot);
+                queue.push(el.shadowRoot);
+            }
+        });
+    }
+}
+
 function sharedShiftWithin(root) {
-    sharedShiftFixedElement(root);
-    if (root.querySelectorAll) root.querySelectorAll("*").forEach(sharedShiftFixedElement);
+    sharedShiftElementTree(root);
     if (document.getElementById(SHARED_TASKBAR.HOST_ID)) sharedDiscoverOrgStickyCards(root);
 }
 
