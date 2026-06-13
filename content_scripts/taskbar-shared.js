@@ -28,6 +28,7 @@ const SHARED_TASKBAR = {
     PREV_OVERFLOW_Y_ATTR: "data-shared-taskbar-prev-overflow-y",
     EVT_READY: "shared-taskbar:ready",
     EVT_REMOVED: "shared-taskbar:removed",
+    EVT_PAGE_NAV: "shared-taskbar:page-nav",
 };
 
 // ---- page shifting ---------------------------------------------------------
@@ -42,6 +43,12 @@ let sharedLinkedInJobSearchPage = null;
 let sharedOrgStickyObserver = null;
 let sharedConstrainTimer = null;
 let sharedResizeConstrainHandler = null;
+let sharedSpaNavInstalled = false;
+let sharedSlotIntegrityObserver = null;
+let sharedSlotIntegrityConfig = null;
+let sharedRegisteringSlot = false;
+let sharedTaskbarOpenAllowed = false;
+let sharedOpenEpoch = 0;
 const sharedShiftedElements = new Set();
 const sharedOrgStickyWatched = new WeakSet();
 const SHARED_MUTATION_DEBOUNCE_MS = 250;
@@ -140,11 +147,31 @@ function sharedIsJobSearchFilter(el) {
 
 // Secondary sticky rows on job search (filter toolbar, "Jobs based on your
 // preferences", results chrome) track the shifted main nav — only top ~0 needs
-// an independent bump.
+// an independent bump. Must not call sharedGetEffectiveTop (that calls
+// sharedIsLikelyPrimaryNav, which calls back here).
 function sharedIsJobSearchSecondaryHeader(el, cs) {
     if (!sharedIsLinkedInJobSearchPage()) return false;
-    const top = sharedGetEffectiveTop(el, cs);
-    return top === null || top >= SHARED_TASKBAR.HEIGHT - 4;
+    cs = cs || getComputedStyle(el);
+    if (cs.position !== "fixed" && cs.position !== "sticky") return false;
+
+    const rect = el.getBoundingClientRect();
+    if (rect.height > 0) {
+        if (rect.top >= SHARED_TASKBAR.HEIGHT - 4) return true;
+        return false;
+    }
+
+    let top = parseFloat(cs.top);
+    if (!isNaN(top) && cs.top !== "auto") {
+        return top >= SHARED_TASKBAR.HEIGHT - 4;
+    }
+
+    const inset = parseFloat(cs.getPropertyValue("inset-block-start"));
+    if (!isNaN(inset) && cs.getPropertyValue("inset-block-start") !== "auto") {
+        return inset >= SHARED_TASKBAR.HEIGHT - 4;
+    }
+
+    // Unknown top — treat as secondary (prior sharedGetEffectiveTop null path).
+    return true;
 }
 
 function sharedIsStuckInHeaderZone(el) {
@@ -671,20 +698,54 @@ function sharedProcessMutationBatch(mutations) {
     }
     sharedShiftPrimaryHeaders();
     sharedScheduleViewportConstrain();
+    sharedEnsureBodyPadding();
 }
 
-function sharedStartShifting() {
+function sharedEnsureBodyPadding() {
+    if (!document.getElementById(SHARED_TASKBAR.HOST_ID)) return;
+    if (sharedShouldSkipPageShifting()) return;
+
+    const pad = parseFloat(getComputedStyle(document.body).paddingTop);
+    if (isNaN(pad) || pad < SHARED_TASKBAR.HEIGHT - 1) {
+        document.body.style.setProperty(
+            "padding-top", SHARED_TASKBAR.HEIGHT + "px", "important"
+        );
+    }
+}
+
+function sharedPruneDisconnectedShiftedElements() {
+    for (const el of sharedShiftedElements) {
+        if (!el.isConnected) sharedShiftedElements.delete(el);
+    }
+}
+
+function sharedApplyPageShift() {
     sharedRefreshPageFlags();
 
-    if (sharedShouldSkipPageShifting()) {
-        // Keep the fixed taskbar overlay only; do not pad or shift the page.
-        return;
-    }
+    if (sharedShouldSkipPageShifting()) return;
 
+    sharedPruneDisconnectedShiftedElements();
     sharedShiftWithin(document.body);
     sharedShiftPrimaryHeaders();
     sharedScheduleViewportConstrain();
-    document.body.style.paddingTop = SHARED_TASKBAR.HEIGHT + "px";
+    if (document.getElementById(SHARED_TASKBAR.HOST_ID)) {
+        document.body.style.setProperty(
+            "padding-top", SHARED_TASKBAR.HEIGHT + "px", "important"
+        );
+    }
+}
+
+function sharedRescanAfterOpen() {
+    if (!document.getElementById(SHARED_TASKBAR.HOST_ID)) return;
+    sharedLinkedInJobSearchPage = null;
+    sharedApplyPageShift();
+    sharedEnsureBodyPadding();
+}
+
+function sharedStartShifting() {
+    if (sharedShouldSkipPageShifting()) return;
+
+    sharedApplyPageShift();
 
     if (sharedTaskbarObserver) return;
     sharedTaskbarObserver = new MutationObserver((mutations) => {
@@ -742,7 +803,8 @@ function sharedStopShifting() {
         sharedTaskbarObserver.disconnect();
         sharedTaskbarObserver = null;
     }
-    document.body.style.paddingTop = "0";
+    sharedStopSlotIntegrityObserver();
+    document.body.style.removeProperty("padding-top");
     document.querySelectorAll("[" + SHARED_TASKBAR.SHIFTED_ATTR + "]").forEach(sharedRestoreShiftedElement);
     document.querySelectorAll("[" + SHARED_TASKBAR.SHIFT_ROW_HEIGHT_ATTR + "]").forEach((el) => {
         el.removeAttribute(SHARED_TASKBAR.SHIFT_ROW_HEIGHT_ATTR);
@@ -751,27 +813,209 @@ function sharedStopShifting() {
 }
 
 // ---- host lifecycle --------------------------------------------------------
-// Build the shadow DOM with createElement (not innerHTML) so static analyzers
-// don't flag unsafe HTML assignment; markup is still entirely hardcoded constants.
-function sharedBuildShadowDom(shadow) {
-    const style = document.createElement("style");
-    style.textContent =
-        ":host{display:block;width:100%;height:100%;}" +
-        ".bar{display:flex;align-items:center;gap:8px;height:100%;padding:0 12px;" +
-        "box-sizing:border-box;font-family:system-ui,sans-serif;}" +
-        "." + SHARED_TASKBAR.SLOTS_CLASS + "{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0;}" +
-        "." + SHARED_TASKBAR.SLOT_CLASS + "{display:flex;align-items:center;gap:6px;flex:0 0 auto;}" +
-        "button{padding:6px 12px;font-size:13px;cursor:pointer;}";
+// Open shadow root for the bar interior. LinkedIn job search often clears
+// foreign light-DOM children under <html>; shadow content survives that.
+// Any cooperating extension can still reach slots via host.shadowRoot.
+function sharedApplyHostChromeStyles(host) {
+    const h = SHARED_TASKBAR.HEIGHT + "px";
+    host.style.setProperty("position", "fixed", "important");
+    host.style.setProperty("top", "0", "important");
+    host.style.setProperty("left", "0", "important");
+    host.style.setProperty("width", "100%", "important");
+    host.style.setProperty("height", h, "important");
+    host.style.setProperty("max-height", h, "important");
+    host.style.setProperty("box-sizing", "border-box", "important");
+    host.style.setProperty("border-bottom", "2px solid #000", "important");
+    host.style.setProperty("background-color", "#f0f0f0", "important");
+    host.style.setProperty("z-index", "2147483647", "important");
+    host.style.setProperty("overflow", "hidden", "important");
+}
 
-    const bar = document.createElement("div");
-    bar.className = "bar";
+function sharedGetTaskbarRoot(host) {
+    if (!host) return null;
+    if (host.shadowRoot) return host.shadowRoot;
+    host.replaceChildren();
+    return host.attachShadow({ mode: "open" });
+}
 
-    const slots = document.createElement("div");
-    slots.className = SHARED_TASKBAR.SLOTS_CLASS;
+function sharedQueryTaskbar(host, selector) {
+    const root = host && host.shadowRoot;
+    return root ? root.querySelector(selector) : null;
+}
 
-    bar.appendChild(slots);
-    shadow.appendChild(style);
-    shadow.appendChild(bar);
+function sharedHostStyleSheet() {
+    const h = SHARED_TASKBAR.HEIGHT + "px";
+    return (
+        ":host{display:block!important;width:100%!important;height:100%!important;" +
+        "max-height:" + h + "!important;box-sizing:border-box!important;" +
+        "overflow:hidden!important;visibility:visible!important;opacity:1!important;}" +
+        ".bar{display:flex!important;align-items:center!important;gap:8px!important;" +
+        "height:100%!important;max-height:" + h + "!important;padding:0 12px!important;" +
+        "box-sizing:border-box!important;font-family:system-ui,sans-serif!important;" +
+        "visibility:visible!important;overflow:hidden!important;" +
+        "background-color:#f0f0f0!important;}" +
+        "." + SHARED_TASKBAR.SLOTS_CLASS +
+        "{display:flex!important;align-items:center!important;gap:8px!important;flex:1 1 auto!important;" +
+        "min-width:0!important;visibility:visible!important;overflow:visible!important;}" +
+        "." + SHARED_TASKBAR.SLOT_CLASS +
+        "{display:flex!important;align-items:center!important;gap:6px!important;flex:0 0 auto!important;" +
+        "visibility:visible!important;overflow:visible!important;}" +
+        "button{display:inline-block!important;visibility:visible!important;" +
+        "opacity:1!important;padding:6px 12px!important;font-size:13px!important;cursor:pointer!important;}"
+    );
+}
+
+function sharedBuildHostDom(host) {
+    sharedApplyHostChromeStyles(host);
+    const root = sharedGetTaskbarRoot(host);
+
+    let style = root.querySelector("style[data-shared-taskbar]");
+    if (!style) {
+        style = document.createElement("style");
+        style.setAttribute("data-shared-taskbar", "1");
+        root.appendChild(style);
+    }
+    style.textContent = sharedHostStyleSheet();
+
+    let bar = root.querySelector(".bar");
+    if (!bar) {
+        bar = document.createElement("div");
+        bar.className = "bar";
+        root.appendChild(bar);
+    }
+
+    let slots = bar.querySelector("." + SHARED_TASKBAR.SLOTS_CLASS);
+    if (!slots) {
+        slots = document.createElement("div");
+        slots.className = SHARED_TASKBAR.SLOTS_CLASS;
+        bar.appendChild(slots);
+    }
+}
+
+function sharedEnsureHostStructure(host) {
+    if (!host.shadowRoot) sharedGetTaskbarRoot(host);
+    if (sharedQueryTaskbar(host, "." + SHARED_TASKBAR.SLOTS_CLASS)) return;
+    sharedBuildHostDom(host);
+}
+
+function sharedGetSlot(extKey) {
+    const host = document.getElementById(SHARED_TASKBAR.HOST_ID);
+    if (!host) return null;
+    return sharedQueryTaskbar(host, sharedSlotSelector(extKey));
+}
+
+function sharedSlotHasButtons(extKey) {
+    const slot = sharedGetSlot(extKey);
+    return !!(slot && slot.querySelector("button"));
+}
+
+function sharedStopSlotIntegrityObserver() {
+    if (sharedSlotIntegrityObserver) {
+        sharedSlotIntegrityObserver.disconnect();
+        sharedSlotIntegrityObserver = null;
+    }
+    sharedSlotIntegrityConfig = null;
+}
+
+function sharedWatchSlotIntegrity(extKey, buildFn, order) {
+    sharedSlotIntegrityConfig = { extKey, buildFn, order };
+    sharedStopSlotIntegrityObserver();
+
+    const host = document.getElementById(SHARED_TASKBAR.HOST_ID);
+    if (!host) return;
+
+    const root = sharedGetTaskbarRoot(host);
+    sharedSlotIntegrityObserver = new MutationObserver(() => {
+        if (sharedRegisteringSlot) return;
+
+        const currentHost = document.getElementById(SHARED_TASKBAR.HOST_ID);
+        if (!currentHost || !sharedSlotIntegrityConfig) {
+            sharedStopSlotIntegrityObserver();
+            return;
+        }
+
+        if (!sharedQueryTaskbar(currentHost, "." + SHARED_TASKBAR.SLOTS_CLASS)) {
+            sharedBuildHostDom(currentHost);
+        }
+
+        if (!sharedTaskbarOpenAllowed) return;
+
+        const cfg = sharedSlotIntegrityConfig;
+        if (!sharedSlotHasButtons(cfg.extKey)) {
+            registerTaskbar(cfg.extKey, cfg.buildFn, cfg.order);
+        }
+    });
+    sharedSlotIntegrityObserver.observe(root, { childList: true, subtree: true });
+}
+
+// Remove a host that lost its slots (e.g. LinkedIn SPA clobbered the bar tree).
+function sharedTeardownEmptyHost() {
+    const host = document.getElementById(SHARED_TASKBAR.HOST_ID);
+    if (!host) return false;
+
+    const slots = sharedQueryTaskbar(host, "." + SHARED_TASKBAR.SLOTS_CLASS);
+    if (!slots || slots.children.length === 0) {
+        host.remove();
+        sharedStopShifting();
+        sharedStopSlotIntegrityObserver();
+        document.dispatchEvent(new CustomEvent(SHARED_TASKBAR.EVT_REMOVED, {
+            detail: { hostId: SHARED_TASKBAR.HOST_ID },
+        }));
+        return true;
+    }
+
+    return false;
+}
+
+function sharedHostIsEmptyShell() {
+    const host = document.getElementById(SHARED_TASKBAR.HOST_ID);
+    if (!host) return false;
+
+    const slots = sharedQueryTaskbar(host, "." + SHARED_TASKBAR.SLOTS_CLASS);
+    if (!slots || slots.children.length === 0) return true;
+
+    return Array.from(slots.children).every(
+        (slot) => !slot.querySelector("button")
+    );
+}
+
+function sharedRemoveTaskbarHost() {
+    const host = document.getElementById(SHARED_TASKBAR.HOST_ID);
+    if (!host) return false;
+
+    host.remove();
+    sharedStopShifting();
+    sharedStopSlotIntegrityObserver();
+    document.dispatchEvent(new CustomEvent(SHARED_TASKBAR.EVT_REMOVED, {
+        detail: { hostId: SHARED_TASKBAR.HOST_ID },
+    }));
+    return true;
+}
+
+function sharedInstallSpaNavigationWatch() {
+    if (sharedSpaNavInstalled) return;
+    sharedSpaNavInstalled = true;
+
+    let lastHref = location.href;
+    const onNavigate = () => {
+        if (location.href === lastHref) return;
+        lastHref = location.href;
+        sharedLinkedInJobSearchPage = null;
+        if (!document.getElementById(SHARED_TASKBAR.HOST_ID)) return;
+        sharedStartShifting();
+        document.dispatchEvent(new CustomEvent(SHARED_TASKBAR.EVT_PAGE_NAV, {
+            detail: { href: location.href },
+        }));
+    };
+
+    window.addEventListener("popstate", onNavigate);
+    const wrapHistory = (original) => function (...args) {
+        const ret = original.apply(this, args);
+        onNavigate();
+        return ret;
+    };
+    history.pushState = wrapHistory(history.pushState);
+    history.replaceState = wrapHistory(history.replaceState);
 }
 
 // Idempotent and synchronous: content scripts from different extensions run as
@@ -779,29 +1023,87 @@ function sharedBuildShadowDom(shadow) {
 // guarantees the second extension reuses the first one's host (no race, no
 // duplicate bars).
 function sharedEnsureTaskbar() {
-    const existing = document.getElementById(SHARED_TASKBAR.HOST_ID);
-    if (existing) return existing.shadowRoot;
+    sharedInstallSpaNavigationWatch();
+
+    let existing = document.getElementById(SHARED_TASKBAR.HOST_ID);
+    if (existing) {
+        if (!existing.shadowRoot) {
+            existing.replaceChildren();
+            existing.attachShadow({ mode: "open" });
+        }
+        sharedEnsureHostStructure(existing);
+        sharedApplyHostChromeStyles(existing);
+    }
+    if (existing) {
+        sharedStartShifting();
+        return existing;
+    }
 
     const host = document.createElement("div");
     host.id = SHARED_TASKBAR.HOST_ID;
-    host.style.cssText =
-        "position: fixed; top: 0; left: 0; width: 100%; height: " + SHARED_TASKBAR.HEIGHT +
-        "px; box-sizing: border-box; border-bottom: 2px solid #000;" +
-        "background-color: #f0f0f0; z-index: 2147483647;";
-
-    const shadow = host.attachShadow({ mode: "open" });
-    sharedBuildShadowDom(shadow);
+    sharedBuildHostDom(host);
 
     document.documentElement.prepend(host);
     sharedStartShifting();
     document.dispatchEvent(new CustomEvent(SHARED_TASKBAR.EVT_READY, {
         detail: { hostId: SHARED_TASKBAR.HOST_ID },
     }));
-    return shadow;
+    return host;
+}
+
+function sharedRebuildSlotIfEmpty(extKey, buildFn, order) {
+    if (!sharedTaskbarOpenAllowed) return false;
+
+    const host = document.getElementById(SHARED_TASKBAR.HOST_ID);
+    if (!host) return false;
+
+    if (!sharedQueryTaskbar(host, "." + SHARED_TASKBAR.SLOTS_CLASS)) {
+        sharedBuildHostDom(host);
+    }
+    if (sharedSlotHasButtons(extKey)) return true;
+
+    registerTaskbar(extKey, buildFn, order);
+    return sharedSlotHasButtons(extKey);
 }
 
 function sharedSlotSelector(extKey) {
     return "." + SHARED_TASKBAR.SLOT_CLASS + '[data-ext="' + extKey + '"]';
+}
+
+// Full teardown — same end state as a page with the taskbar closed.
+function sharedFullyCloseTaskbar(extKey) {
+    sharedTaskbarOpenAllowed = false;
+    sharedOpenEpoch += 1;
+    unregisterTaskbar(extKey);
+    sharedRemoveTaskbarHost();
+}
+
+// Open after a navigation-style reset. Page load restores via
+// storage.get().then(show), which always runs later than script init; reopen
+// used to run synchronously on click while the SPA was mid-update.
+function sharedResetAndOpenTaskbar(extKey, buildFn, order) {
+    sharedTaskbarOpenAllowed = true;
+    sharedOpenEpoch += 1;
+    const openEpoch = sharedOpenEpoch;
+
+    unregisterTaskbar(extKey);
+    sharedRemoveTaskbarHost();
+    sharedStopShifting();
+
+    const openNow = () => {
+        if (!sharedTaskbarOpenAllowed || openEpoch !== sharedOpenEpoch) return;
+        registerTaskbar(extKey, buildFn, order);
+        queueMicrotask(() => {
+            if (!sharedTaskbarOpenAllowed || openEpoch !== sharedOpenEpoch) return;
+            sharedRescanAfterOpen();
+        });
+    };
+
+    queueMicrotask(() => {
+        requestAnimationFrame(() => {
+            requestAnimationFrame(openNow);
+        });
+    });
 }
 
 // ---- public API ------------------------------------------------------------
@@ -812,24 +1114,51 @@ function sharedSlotSelector(extKey) {
 // (lower = further left); slots with equal order fall back to insertion order.
 // Returns the slot element.
 function registerTaskbar(extKey, buildFn, order) {
-    const shadow = sharedEnsureTaskbar();
-    const slots = shadow.querySelector("." + SHARED_TASKBAR.SLOTS_CLASS);
+    if (!sharedTaskbarOpenAllowed) return null;
 
-    let slot = slots.querySelector(sharedSlotSelector(extKey));
-    if (!slot) {
-        slot = document.createElement("div");
-        slot.className = SHARED_TASKBAR.SLOT_CLASS;
-        slot.setAttribute("data-ext", extKey);
-        slot.setAttribute("data-order", String(Number(order) || 0));
-        sharedInsertSlotOrdered(slots, slot);
-    } else {
-        slot.setAttribute("data-order", String(Number(order) || 0));
-        sharedInsertSlotOrdered(slots, slot); // re-place in case order changed
-        slot.replaceChildren(); // idempotent re-register
+    sharedRegisteringSlot = true;
+    try {
+        const host = sharedEnsureTaskbar();
+        if (!host) return null;
+
+        sharedEnsureHostStructure(host);
+        const slots = sharedQueryTaskbar(host, "." + SHARED_TASKBAR.SLOTS_CLASS);
+        if (!slots) return null;
+
+        let slot = slots.querySelector(sharedSlotSelector(extKey));
+        if (!slot) {
+            slot = document.createElement("div");
+            slot.className = SHARED_TASKBAR.SLOT_CLASS;
+            slot.setAttribute("data-ext", extKey);
+            slot.setAttribute("data-order", String(Number(order) || 0));
+            sharedInsertSlotOrdered(slots, slot);
+        } else {
+            slot.setAttribute("data-order", String(Number(order) || 0));
+            sharedInsertSlotOrdered(slots, slot); // re-place in case order changed
+            slot.replaceChildren(); // idempotent re-register
+        }
+
+        if (typeof buildFn === "function") {
+            try {
+                buildFn(slot, host);
+            } catch (err) {
+                console.warn("shared taskbar buildFn failed:", err);
+            }
+        }
+
+        if (sharedIsLinkedInJobSearchPage()) {
+            setTimeout(() => {
+                if (!sharedTaskbarOpenAllowed) return;
+                sharedApplyPageShift();
+            }, 120);
+        } else {
+            sharedApplyPageShift();
+        }
+        sharedWatchSlotIntegrity(extKey, buildFn, order);
+        return slot;
+    } finally {
+        sharedRegisteringSlot = false;
     }
-
-    if (typeof buildFn === "function") buildFn(slot, shadow);
-    return slot;
 }
 
 // Insert/move slot so siblings stay sorted by data-order. Insertion order is
@@ -846,15 +1175,22 @@ function sharedInsertSlotOrdered(slots, slot) {
 // taskbar and restore the page — safe to call from either extension.
 function unregisterTaskbar(extKey) {
     const host = document.getElementById(SHARED_TASKBAR.HOST_ID);
-    if (!host || !host.shadowRoot) return false;
+    if (!host) return false;
 
-    const slots = host.shadowRoot.querySelector("." + SHARED_TASKBAR.SLOTS_CLASS);
+    const slots = sharedQueryTaskbar(host, "." + SHARED_TASKBAR.SLOTS_CLASS);
     const slot = slots && slots.querySelector(sharedSlotSelector(extKey));
     if (slot) slot.remove();
 
-    if (slots && slots.children.length === 0) {
+    if (slots) {
+        Array.from(slots.children).forEach((child) => {
+            if (!child.querySelector("button")) child.remove();
+        });
+    }
+
+    if (!slots || slots.children.length === 0) {
         host.remove();
         sharedStopShifting();
+        sharedStopSlotIntegrityObserver();
         document.dispatchEvent(new CustomEvent(SHARED_TASKBAR.EVT_REMOVED, {
             detail: { hostId: SHARED_TASKBAR.HOST_ID },
         }));
@@ -864,7 +1200,5 @@ function unregisterTaskbar(extKey) {
 
 // Whether this extension currently has a slot in the taskbar.
 function isTaskbarRegistered(extKey) {
-    const host = document.getElementById(SHARED_TASKBAR.HOST_ID);
-    if (!host || !host.shadowRoot) return false;
-    return !!host.shadowRoot.querySelector(sharedSlotSelector(extKey));
+    return !!sharedGetSlot(extKey);
 }
