@@ -1114,7 +1114,7 @@ function sharedResetAndOpenTaskbar(extKey, buildFn, order) {
 // (lower = further left); slots with equal order fall back to insertion order.
 // Returns the slot element.
 function registerTaskbar(extKey, buildFn, order) {
-    if (!sharedTaskbarOpenAllowed) return null;
+    sharedTaskbarOpenAllowed = true;
 
     sharedRegisteringSlot = true;
     try {
@@ -1140,7 +1140,7 @@ function registerTaskbar(extKey, buildFn, order) {
 
         if (typeof buildFn === "function") {
             try {
-                buildFn(slot, host);
+                buildFn(slot, host.shadowRoot || sharedGetTaskbarRoot(host));
             } catch (err) {
                 console.warn("shared taskbar buildFn failed:", err);
             }
