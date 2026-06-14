@@ -22,9 +22,11 @@ const QUICKBOARD_RENAME_BTN_ACTIVE =
 // scroll_elements.js — content.js only mounts the section and adds new elements.
 function buildQuickBoardSlot(slot, shadow) {
     // Let this slot grow within the bar so the scrollable section can claim the
-    // leftover space instead of pushing the Rename button out.
-    slot.style.flex = "1 1 auto";
-    slot.style.minWidth = "0";
+    // leftover space instead of pushing the Rename button out. Shadow-root bar
+    // CSS uses !important on slot flex, so match that here.
+    slot.style.setProperty("flex", "1 1 auto", "important");
+    slot.style.setProperty("min-width", "0", "important");
+    slot.style.setProperty("overflow", "hidden", "important");
 
     // Text field — the first element in QuickBoard's section of the taskbar.
     const input = document.createElement("input");

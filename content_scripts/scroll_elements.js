@@ -159,6 +159,10 @@ function createScrollSection(shadow) {
         "display: flex; align-items: center; gap: 6px;" +
         "flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden;" +
         "scrollbar-width: thin;";
+    section.style.setProperty("flex", "1 1 auto", "important");
+    section.style.setProperty("min-width", "0", "important");
+    section.style.setProperty("overflow-x", "auto", "important");
+    section.style.setProperty("overflow-y", "hidden", "important");
     qbEntriesEl = section;
 
     // The dropdown panel must live OUTSIDE the scroll container: the scroller
