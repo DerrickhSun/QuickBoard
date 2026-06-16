@@ -182,6 +182,19 @@ function sharedIsStuckInHeaderZone(el) {
     return rect.top >= min && rect.top <= max;
 }
 
+// When body padding has already moved in-flow sticky chrome to the taskbar band,
+// rect.top ≈ HEIGHT but the CSS top base is still 0 — do not treat rect as base.
+function sharedRectTopToShiftBase(el, cs, rectTop) {
+    cs = cs || getComputedStyle(el);
+    if (cs.position === "sticky" && rectTop >= SHARED_TASKBAR.HEIGHT - 4 &&
+        rectTop <= SHARED_TASKBAR.HEIGHT + 12) {
+        return 0;
+    }
+    if (rectTop <= SHARED_TASKBAR.HEIGHT + 8) return rectTop;
+    if (cs.position === "sticky") return 0;
+    return rectTop;
+}
+
 function sharedGetEffectiveTop(el, cs) {
     cs = cs || getComputedStyle(el);
     let top = parseFloat(cs.top);
@@ -203,7 +216,8 @@ function sharedGetEffectiveTop(el, cs) {
         if (el.hasAttribute(SHARED_TASKBAR.SHIFT_BASE_ATTR)) {
             return sharedGetShiftBaseTop(el) + SHARED_TASKBAR.HEIGHT;
         }
-        return rectTop < SHARED_TASKBAR.MAX_SHIFT_TOP ? rectTop : 0;
+        const base = sharedRectTopToShiftBase(el, cs, rectTop);
+        return base < SHARED_TASKBAR.MAX_SHIFT_TOP ? base : 0;
     }
 
     if (sharedIsTopViewportChrome(el, cs)) {
@@ -211,7 +225,8 @@ function sharedGetEffectiveTop(el, cs) {
         if (el.hasAttribute(SHARED_TASKBAR.SHIFT_BASE_ATTR)) {
             return sharedGetShiftBaseTop(el) + SHARED_TASKBAR.HEIGHT;
         }
-        return rectTop <= SHARED_TASKBAR.MAX_SHIFT_TOP ? rectTop : 0;
+        const base = sharedRectTopToShiftBase(el, cs, rectTop);
+        return base <= SHARED_TASKBAR.MAX_SHIFT_TOP ? base : 0;
     }
     return null;
 }
@@ -544,22 +559,25 @@ function sharedRecordShiftRowHeight(el) {
     }
 }
 
-// In-header chrome (job-search filter pills) uses a small computed top inside
-// the shifted row. Stacked sub-headers (LinkedIn company bar) use top at/near
-// the row's original height and need their own bump.
-function sharedIsInShiftedHeaderBand(el, ancestor) {
-    const top = parseFloat(getComputedStyle(el).top);
-    if (isNaN(top)) return true;
+// Stacked sub-headers (e.g. LinkedIn company bar) pin below the main row with an
+// explicit top/inset and need their own bump even inside an already-shifted ancestor.
+function sharedIsStackedSubHeaderRow(el, cs) {
+    if (sharedIsOrgStickyCard(el)) return true;
 
-    // Company-style sub-navs pin at ~nav-height (50px+). Catch these even when
-    // the stored row height was inflated by an already-open sub-bar.
-    if (top >= SHARED_TASKBAR.HEIGHT - 10) return false;
+    cs = cs || getComputedStyle(el);
+    let top = parseFloat(cs.top);
+    if (!isNaN(top) && cs.top !== "auto" && top >= SHARED_TASKBAR.HEIGHT - 4) return true;
 
-    const rowHeight = sharedGetShiftRowHeight(ancestor);
-    return top < rowHeight - 4;
+    const inset = parseFloat(cs.getPropertyValue("inset-block-start"));
+    if (!isNaN(inset) && cs.getPropertyValue("inset-block-start") !== "auto" &&
+        inset >= SHARED_TASKBAR.HEIGHT - 4) {
+        return true;
+    }
+    return false;
 }
 
-// Skip when the element already moves with a shifted fixed/sticky ancestor.
+// Skip when a shifted fixed/sticky ancestor already moves this element. The only
+// descendant exception is a stacked sub-row with explicit top/inset ≥ nav height.
 function sharedShouldSkipShift(el, cs) {
     cs = cs || getComputedStyle(el);
     if (cs.position !== "fixed" && cs.position !== "sticky") return true;
@@ -570,12 +588,16 @@ function sharedShouldSkipShift(el, cs) {
     if (sharedIsAppPositionedOverlay(el, cs)) return true;
     if (sharedFindAnchoredShiftedReference(el)) return true;
 
-    const ancestor = sharedFindNearestShiftedFixedAncestor(el);
-    if (!ancestor) return false;
+    // In-flow sticky chrome is already offset by body padding; shifting top again
+    // double-counts (e.g. ChatGPT thread header). Only stacked sub-rows with an
+    // explicit top/inset below the main band still need their own bump.
+    if (cs.position === "sticky" && !sharedIsStackedSubHeaderRow(el, cs)) return true;
 
     if (sharedHasFixedContainingBlockAncestor(el)) return true;
-    if (sharedIsInShiftedHeaderBand(el, ancestor)) return true;
-    if (!sharedIsViewportHeaderCandidate(el, cs)) return true;
+
+    const ancestor = sharedFindNearestShiftedFixedAncestor(el);
+    if (ancestor && !sharedIsStackedSubHeaderRow(el, cs)) return true;
+
     return false;
 }
 
@@ -611,7 +633,16 @@ function sharedShiftFixedElement(el, cs) {
     if (el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) {
         // Always restore to the original base + bar height. Do not add HEIGHT
         // to the current computed top (that double-shifts after Google scroll).
-        const target = sharedGetShiftBaseTop(el) + SHARED_TASKBAR.HEIGHT;
+        let base = sharedGetShiftBaseTop(el);
+        if (cs.position === "sticky" && base >= SHARED_TASKBAR.HEIGHT - 4 &&
+            base <= SHARED_TASKBAR.HEIGHT + 12) {
+            const prevTop = el.getAttribute(SHARED_TASKBAR.SHIFTED_ATTR) || "";
+            if (prevTop === "" || prevTop === "0" || prevTop === "0px") {
+                base = 0;
+                el.setAttribute(SHARED_TASKBAR.SHIFT_BASE_ATTR, "0");
+            }
+        }
+        const target = base + SHARED_TASKBAR.HEIGHT;
         const current = sharedGetEffectiveTop(el, cs);
         if (current === null || Math.abs(current - target) > 0.5) {
             sharedApplyTop(el, target);
@@ -624,6 +655,18 @@ function sharedShiftFixedElement(el, cs) {
 
     const top = sharedGetEffectiveTop(el, cs);
     if (top === null || top >= SHARED_TASKBAR.MAX_SHIFT_TOP) return;
+
+    const targetTop = top + SHARED_TASKBAR.HEIGHT;
+    const rectTop = Math.round(el.getBoundingClientRect().top);
+    if (Math.abs(rectTop - targetTop) <= 3) {
+        // Already at the intended visual offset (e.g. body padding) — track only.
+        if (!el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) {
+            el.setAttribute(SHARED_TASKBAR.SHIFTED_ATTR, el.style.getPropertyValue("top") || "");
+            el.setAttribute(SHARED_TASKBAR.SHIFT_BASE_ATTR, String(top));
+            sharedShiftedElements.add(el);
+        }
+        return;
+    }
 
     el.setAttribute(SHARED_TASKBAR.SHIFTED_ATTR, el.style.getPropertyValue("top") || "");
     el.setAttribute(SHARED_TASKBAR.SHIFT_BASE_ATTR, String(top));
