@@ -237,10 +237,24 @@ function sharedIsLikelyPrimaryNav(el, cs) {
     if (sharedIsOrgStickyCard(el)) return false;
     if (sharedIsJobSearchFilter(el)) return false;
     if (sharedIsJobSearchSecondaryHeader(el, cs)) return false;
+    if (el.matches(".p-navSticky, [data-xf-init=\"sticky-header\"]") ||
+        el.closest(".p-navSticky, [data-xf-init=\"sticky-header\"]")) {
+        return true;
+    }
     if (el.closest("header, [role=\"banner\"], #global-nav, .global-nav")) return true;
     if (el.closest("shreddit-header, reddit-header")) return true;
     const rect = el.getBoundingClientRect();
     return rect.top >= 0 && rect.top <= SHARED_TASKBAR.HEIGHT && rect.width > window.innerWidth * 0.4;
+}
+
+// Sticky headers inside main/article content ride on body padding alone (ChatGPT).
+// Viewport-level primary nav (XenForo p-navSticky, etc.) still needs a top bump so
+// the stick point clears our bar when scrolling.
+function sharedIsContainedStickyHeader(el) {
+    return !!el.closest(
+        "main, [role=\"main\"], article, [role=\"article\"], " +
+        "[data-testid*=\"thread\"], [data-testid*=\"conversation\"]"
+    );
 }
 
 // Full-width bar pinned to the top band of the viewport (not a anchored popup).
@@ -588,10 +602,14 @@ function sharedShouldSkipShift(el, cs) {
     if (sharedIsAppPositionedOverlay(el, cs)) return true;
     if (sharedFindAnchoredShiftedReference(el)) return true;
 
-    // In-flow sticky chrome is already offset by body padding; shifting top again
-    // double-counts (e.g. ChatGPT thread header). Only stacked sub-rows with an
-    // explicit top/inset below the main band still need their own bump.
-    if (cs.position === "sticky" && !sharedIsStackedSubHeaderRow(el, cs)) return true;
+    // In-content sticky chrome is offset by body padding alone. Viewport-level
+    // primary nav (e.g. XenForo p-navSticky) still needs top so its stick point
+    // clears our bar — padding does not change where sticky;top:0 pins on scroll.
+    if (cs.position === "sticky" && !sharedIsStackedSubHeaderRow(el, cs)) {
+        if (!sharedIsLikelyPrimaryNav(el, cs) || sharedIsContainedStickyHeader(el, cs)) {
+            return true;
+        }
+    }
 
     if (sharedHasFixedContainingBlockAncestor(el)) return true;
 
