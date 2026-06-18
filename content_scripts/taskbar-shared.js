@@ -22,6 +22,7 @@ const SHARED_TASKBAR = {
     // grows when a sub-header opens and breaks stacked-header detection.
     SHIFT_ROW_HEIGHT_ATTR: "data-shared-taskbar-row-height",
     CONSTRAINED_ATTR: "data-shared-taskbar-constrained",
+    FIT_TRIM_ATTR: "data-shared-taskbar-fit-trim",
     PREV_MAX_HEIGHT_ATTR: "data-shared-taskbar-prev-max-height",
     PREV_MIN_HEIGHT_ATTR: "data-shared-taskbar-prev-min-height",
     PREV_HEIGHT_ATTR: "data-shared-taskbar-prev-height",
@@ -470,6 +471,155 @@ function sharedConstrainElementToViewport(el, viewportH) {
     sharedApplyViewportConstraint(el, maxH, cs);
 }
 
+function sharedRestoreViewportFitTrim(el) {
+    sharedRestoreViewportConstraint(el);
+    el.removeAttribute(SHARED_TASKBAR.FIT_TRIM_ATTR);
+}
+
+// Shrink a viewport-sized shell without turning it into a nested scroller.
+function sharedApplyViewportFitTrim(el, maxH, cs) {
+    cs = cs || getComputedStyle(el);
+    const forceHeight = sharedIsExplicitViewportShell(el);
+
+    if (el.hasAttribute(SHARED_TASKBAR.FIT_TRIM_ATTR)) {
+        const curH = parseFloat(el.style.getPropertyValue("height"));
+        const curMax = parseFloat(el.style.getPropertyValue("max-height"));
+        if (
+            (!isNaN(curH) && Math.abs(curH - maxH) <= 1) ||
+            (!isNaN(curMax) && Math.abs(curMax - maxH) <= 1)
+        ) {
+            return;
+        }
+    }
+
+    if (!el.hasAttribute(SHARED_TASKBAR.PREV_MAX_HEIGHT_ATTR)) {
+        el.setAttribute(SHARED_TASKBAR.PREV_MAX_HEIGHT_ATTR, el.style.getPropertyValue("max-height") || "");
+    }
+    el.style.setProperty("max-height", maxH + "px", "important");
+
+    const minH = parseFloat(cs.minHeight);
+    if (!isNaN(minH) && minH > maxH) {
+        if (!el.hasAttribute(SHARED_TASKBAR.PREV_MIN_HEIGHT_ATTR)) {
+            el.setAttribute(SHARED_TASKBAR.PREV_MIN_HEIGHT_ATTR, el.style.getPropertyValue("min-height") || "");
+        }
+        el.style.setProperty("min-height", "0px", "important");
+    }
+
+    const height = parseFloat(cs.height);
+    if (forceHeight || (!isNaN(height) && height > maxH)) {
+        if (!el.hasAttribute(SHARED_TASKBAR.PREV_HEIGHT_ATTR)) {
+            el.setAttribute(SHARED_TASKBAR.PREV_HEIGHT_ATTR, el.style.getPropertyValue("height") || "");
+        }
+        el.style.setProperty("height", maxH + "px", "important");
+    }
+
+    el.setAttribute(SHARED_TASKBAR.FIT_TRIM_ATTR, "1");
+}
+
+function sharedPageIsNaturallyScrollable() {
+    const doc = document.scrollingElement || document.documentElement;
+    return doc.scrollHeight > window.innerHeight + SHARED_TASKBAR.HEIGHT + 64;
+}
+
+// Tailwind / modern apps often pin the UI with h-svh, h-screen, etc.
+function sharedIsExplicitViewportShell(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    if (el === document.body || el === document.documentElement) return false;
+    if (el.hasAttribute(SHARED_TASKBAR.FIT_TRIM_ATTR)) return true;
+
+    const cls = el.className;
+    if (typeof cls === "string" && /\b(?:min-h-)?h-(?:s|l|d)?vh\b|\b(?:min-h-)?h-screen\b/.test(cls)) {
+        return true;
+    }
+
+    const cs = getComputedStyle(el);
+    return /(?:^|\s)(?:100|[1-9]\d*(?:\.\d+)?)(?:svh|lvh|dvh|vh)\b/.test(cs.height)
+        || /(?:^|\s)(?:100|[1-9]\d*(?:\.\d+)?)(?:svh|lvh|dvh|vh)\b/.test(cs.minHeight);
+}
+
+// True when overflow is ~one taskbar band from a 100vh shell (ChatGPT-style),
+// not a long document that genuinely exceeds the viewport.
+function sharedShouldTrimViewportFit(el, rect, viewportH) {
+    if (el === document.body || el === document.documentElement) return false;
+    if (rect.top > SHARED_TASKBAR.HEIGHT + 8) return false;
+
+    const overflow = rect.bottom - viewportH;
+    if (sharedIsExplicitViewportShell(el)) {
+        // Once trimmed the shell no longer overflows, but we must stay trimmed.
+        if (el.hasAttribute(SHARED_TASKBAR.FIT_TRIM_ATTR)) return true;
+        return overflow > 2 && rect.height >= viewportH - SHARED_TASKBAR.HEIGHT - 32;
+    }
+
+    if (overflow <= 2 || overflow > SHARED_TASKBAR.HEIGHT + 12) return false;
+    if (rect.height < viewportH - 32) return false;
+    if (rect.height > viewportH + SHARED_TASKBAR.HEIGHT + 12) return false;
+    return true;
+}
+
+function sharedCollectViewportFitShells() {
+    const shells = [];
+    const seen = new Set();
+    const add = (el) => {
+        if (!(el instanceof HTMLElement) || seen.has(el)) return;
+        if (el.id === SHARED_TASKBAR.HOST_ID) return;
+        seen.add(el);
+        shells.push(el);
+    };
+
+    if (document.body instanceof HTMLElement) {
+        const stack = [[document.body, 0]];
+        while (stack.length) {
+            const pair = stack.pop();
+            const node = pair[0];
+            const depth = pair[1];
+            if (!(node instanceof HTMLElement) || depth > 6) continue;
+            if (sharedIsExplicitViewportShell(node)) add(node);
+            for (const child of node.children) stack.push([child, depth + 1]);
+        }
+    }
+
+    for (const sel of ["#root", "#__next", "#app", "#mount"]) {
+        add(document.querySelector(sel));
+    }
+    if (document.body instanceof HTMLElement) {
+        for (const child of document.body.children) {
+            if (child instanceof HTMLElement && child.id !== SHARED_TASKBAR.HOST_ID) {
+                add(child);
+            }
+        }
+    }
+    return shells;
+}
+
+function sharedTrimViewportFitShells(viewportH) {
+    const allShells = sharedCollectViewportFitShells();
+    const explicitShells = allShells.filter(sharedIsExplicitViewportShell);
+    const shells = explicitShells.length ? explicitShells : allShells;
+    const naturallyScrollable = sharedPageIsNaturallyScrollable();
+
+    const trimmed = new Set();
+    for (const el of shells) {
+        const explicit = sharedIsExplicitViewportShell(el);
+        if (naturallyScrollable && !explicit) {
+            if (el.hasAttribute(SHARED_TASKBAR.FIT_TRIM_ATTR)) sharedRestoreViewportFitTrim(el);
+            continue;
+        }
+
+        const rect = el.getBoundingClientRect();
+        if (!sharedShouldTrimViewportFit(el, rect, viewportH)) {
+            if (el.hasAttribute(SHARED_TASKBAR.FIT_TRIM_ATTR)) sharedRestoreViewportFitTrim(el);
+            continue;
+        }
+        const maxH = Math.max(SHARED_MIN_CONSTRAIN_HEIGHT, Math.floor(viewportH - rect.top));
+        sharedApplyViewportFitTrim(el, maxH, getComputedStyle(el));
+        trimmed.add(el);
+    }
+
+    document.querySelectorAll("[" + SHARED_TASKBAR.FIT_TRIM_ATTR + "]").forEach((el) => {
+        if (!trimmed.has(el)) sharedRestoreViewportFitTrim(el);
+    });
+}
+
 function sharedCollectViewportConstraintCandidates() {
     const candidates = new Set();
     for (const el of sharedShiftedElements) {
@@ -493,10 +643,8 @@ function sharedCollectViewportConstraintCandidates() {
     return candidates;
 }
 
-// Job-search panels often use 100vh / calc(100vh - …) and overflow once we shift headers.
-function sharedConstrainViewportOverflow() {
-    if (!sharedIsLinkedInJobSearchPage()) return;
-    const viewportH = window.innerHeight;
+// LinkedIn job-search panels use 100vh and may need inner scroll once shifted.
+function sharedConstrainLinkedInViewportOverflow(viewportH) {
     const roots = new Set();
     for (const el of sharedCollectViewportConstraintCandidates()) {
         if (!(el instanceof HTMLElement) || sharedIsNavChrome(el)) continue;
@@ -507,8 +655,20 @@ function sharedConstrainViewportOverflow() {
     for (const el of roots) sharedConstrainElementToViewport(el, viewportH);
 }
 
+function sharedConstrainViewportOverflow() {
+    if (!document.getElementById(SHARED_TASKBAR.HOST_ID)) return;
+    if (sharedShouldSkipPageShifting()) return;
+
+    const viewportH = window.innerHeight;
+    if (sharedIsLinkedInJobSearchPage()) {
+        sharedConstrainLinkedInViewportOverflow(viewportH);
+    }
+    sharedTrimViewportFitShells(viewportH);
+}
+
 function sharedScheduleViewportConstrain() {
     if (!document.getElementById(SHARED_TASKBAR.HOST_ID)) return;
+    if (sharedShouldSkipPageShifting()) return;
     if (sharedConstrainTimer) return;
     sharedConstrainTimer = setTimeout(() => {
         sharedConstrainTimer = null;
@@ -880,6 +1040,7 @@ function sharedStopShifting() {
         el.removeAttribute(SHARED_TASKBAR.SHIFT_ROW_HEIGHT_ATTR);
     });
     document.querySelectorAll("[" + SHARED_TASKBAR.CONSTRAINED_ATTR + "]").forEach(sharedRestoreViewportConstraint);
+    document.querySelectorAll("[" + SHARED_TASKBAR.FIT_TRIM_ATTR + "]").forEach(sharedRestoreViewportFitTrim);
 }
 
 // ---- host lifecycle --------------------------------------------------------
