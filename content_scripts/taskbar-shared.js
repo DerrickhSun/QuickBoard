@@ -95,6 +95,37 @@ function sharedFindNearestShiftedFixedAncestor(el) {
     return null;
 }
 
+function sharedFindNearestShiftedAncestor(el) {
+    let node = el.parentElement;
+    while (node) {
+        if (node instanceof HTMLElement && node.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) {
+            return node;
+        }
+        node = node.parentElement;
+    }
+    return null;
+}
+
+// Google SRP (and similar) place the search bar in position:absolute at top:20px.
+// Body padding does not move it when the offset parent is the initial containing block.
+function sharedIsAbsoluteTopHeader(el, cs) {
+    if (!(el instanceof HTMLElement)) return false;
+    cs = cs || getComputedStyle(el);
+    if (cs.position !== "absolute") return false;
+    if (el.id === "searchform") return true;
+    const rect = el.getBoundingClientRect();
+    if (rect.height <= 0 || rect.top > SHARED_TASKBAR.HEIGHT + 8) return false;
+    const top = parseFloat(cs.top);
+    if (isNaN(top) || cs.top === "auto" || top >= SHARED_TASKBAR.MAX_SHIFT_TOP) return false;
+    return rect.width > window.innerWidth * 0.35;
+}
+
+function sharedShouldSkipAbsoluteShift(el, cs) {
+    if (!sharedIsAbsoluteTopHeader(el, cs)) return true;
+    if (sharedFindNearestShiftedAncestor(el)) return true;
+    return false;
+}
+
 function sharedFindPositionedAncestorOrSelf(el) {
     let node = el;
     while (node) {
@@ -144,6 +175,21 @@ function sharedIsJobSearchFilter(el) {
         return true;
     }
     return false;
+}
+
+function sharedIsLinkedInProfilePage() {
+    return /linkedin\.com/i.test(location.hostname) &&
+        /^\/in\/[^/?#]+/i.test(location.pathname);
+}
+
+// Profile sub-toolbar (name / Resources / Enhance profile) is scroll-reveal chrome.
+// LinkedIn hides it at scroll top via its own top/transform; forcing top: 50px
+// fights that toggle and flickers at the page top.
+function sharedIsLinkedInProfileScrollToolbar(el) {
+    if (!sharedIsLinkedInProfilePage()) return false;
+    const bar = el.getAttribute("role") === "toolbar" ? el : el.closest('[role="toolbar"]');
+    if (!(bar instanceof HTMLElement)) return false;
+    return !sharedIsNavChrome(bar);
 }
 
 // Secondary sticky rows on job search (filter toolbar, "Jobs based on your
@@ -229,6 +275,17 @@ function sharedGetEffectiveTop(el, cs) {
         const base = sharedRectTopToShiftBase(el, cs, rectTop);
         return base <= SHARED_TASKBAR.MAX_SHIFT_TOP ? base : 0;
     }
+
+    if (sharedIsAbsoluteTopHeader(el, cs)) {
+        const rectTop = Math.round(el.getBoundingClientRect().top);
+        if (el.hasAttribute(SHARED_TASKBAR.SHIFT_BASE_ATTR)) {
+            return sharedGetShiftBaseTop(el) + SHARED_TASKBAR.HEIGHT;
+        }
+        let top = parseFloat(cs.top);
+        if (!isNaN(top) && cs.top !== "auto") return top;
+        return sharedRectTopToShiftBase(el, cs, rectTop);
+    }
+
     return null;
 }
 
@@ -237,6 +294,7 @@ function sharedIsLikelyPrimaryNav(el, cs) {
     if (cs.position !== "fixed" && cs.position !== "sticky") return false;
     if (sharedIsOrgStickyCard(el)) return false;
     if (sharedIsJobSearchFilter(el)) return false;
+    if (sharedIsLinkedInProfileScrollToolbar(el)) return false;
     if (sharedIsJobSearchSecondaryHeader(el, cs)) return false;
     if (el.closest("header, [role=\"banner\"], #global-nav, .global-nav")) return true;
     if (el.closest("shreddit-header, reddit-header")) return true;
@@ -369,6 +427,8 @@ function sharedFindRedditHeader() {
 function sharedShiftPrimaryHeaders() {
     const nav = sharedFindLinkedInGlobalNav() || sharedFindRedditHeader();
     if (nav) sharedShiftFixedElement(nav);
+    const googleSearch = document.getElementById("searchform");
+    if (googleSearch) sharedShiftFixedElement(googleSearch);
     for (const el of sharedShiftedElements) {
         if (el.isConnected) sharedShiftFixedElement(el);
     }
@@ -770,6 +830,7 @@ function sharedShouldSkipShift(el, cs) {
 
     if (sharedIsOrgStickyCard(el)) return false;
     if (sharedIsJobSearchFilter(el)) return true;
+    if (sharedIsLinkedInProfileScrollToolbar(el)) return true;
     if (sharedIsJobSearchSecondaryHeader(el, cs)) return true;
     if (sharedIsAppPositionedOverlay(el, cs)) return true;
     if (sharedFindAnchoredShiftedReference(el)) return true;
@@ -801,20 +862,30 @@ function sharedShiftFixedElement(el, cs) {
     if (!(el instanceof HTMLElement)) return;
     if (el.id === SHARED_TASKBAR.HOST_ID) return;
     cs = cs || getComputedStyle(el);
-    if (sharedShouldSkipShift(el, cs)) {
-        if (el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) sharedRestoreShiftedElement(el);
-        return;
-    }
 
-    if (cs.position !== "fixed" && cs.position !== "sticky") {
-        // Page stopped sticking this element; restore so we can shift again later.
-        if (el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) sharedRestoreShiftedElement(el);
-        return;
-    }
+    const isAbsoluteHeader = sharedIsAbsoluteTopHeader(el, cs);
 
-    if (sharedIsOrgStickyCard(el) && !sharedIsStuckInHeaderZone(el)) {
-        if (el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) sharedRestoreShiftedElement(el);
-        return;
+    if (isAbsoluteHeader) {
+        if (sharedShouldSkipAbsoluteShift(el, cs)) {
+            if (el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) sharedRestoreShiftedElement(el);
+            return;
+        }
+    } else {
+        if (sharedShouldSkipShift(el, cs)) {
+            if (el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) sharedRestoreShiftedElement(el);
+            return;
+        }
+
+        if (cs.position !== "fixed" && cs.position !== "sticky") {
+            // Page stopped sticking this element; restore so we can shift again later.
+            if (el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) sharedRestoreShiftedElement(el);
+            return;
+        }
+
+        if (sharedIsOrgStickyCard(el) && !sharedIsStuckInHeaderZone(el)) {
+            if (el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) sharedRestoreShiftedElement(el);
+            return;
+        }
     }
 
     if (el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) {
@@ -893,6 +964,8 @@ function sharedShiftWithin(root) {
 // Cheap filter — no getBoundingClientRect (avoids layout thrash on feed mutations).
 function sharedIsHeaderMutationCandidate(el) {
     if (el.id === SHARED_TASKBAR.HOST_ID) return false;
+    if (el.id === "searchform") return true;
+    if (sharedIsLinkedInProfileScrollToolbar(el)) return false;
     if (el.hasAttribute(SHARED_TASKBAR.SHIFTED_ATTR)) return true;
     if (el.closest(".org-sticky-top-card, .org-sticky-top-card__container, header, [role=\"banner\"], [role=\"toolbar\"]")) {
         return true;
